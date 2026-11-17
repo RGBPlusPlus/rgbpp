@@ -70,3 +70,21 @@ macro_rules! ensure_eq {
         }
     };
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn syscall_error_conversion_preserves_public_error_codes() {
+        for (source, code) in [
+            (SysError::IndexOutOfBound, 1),
+            (SysError::ItemMissing, 2),
+            (SysError::LengthNotEnough(128), 3),
+            (SysError::Encoding, 4),
+            (SysError::Unknown(100), 5),
+        ] {
+            assert_eq!(Error::from(source) as i8, code);
+        }
+    }
+}

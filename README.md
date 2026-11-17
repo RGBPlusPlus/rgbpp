@@ -39,13 +39,13 @@ explicit feature is for host-side tests, not production contract builds.
 The `Core API tests` workflow runs both feature configurations in test and
 release profiles, independently of contract VM tests. It covers script identity helpers, fixed-format seal outputs,
 Molecule schema serialization and fixed layouts, the full Uint16 conversion
-range, SHA256 known vectors, and two hand-assembled legacy Bitcoin transactions
+range, syscall-error conversion and CKB enum tags, SHA256 known vectors, and two hand-assembled legacy Bitcoin transactions
 with independently fixed byte and transaction-ID expectations. The multi-input
 fixture also checks input/output ordering, different script lengths and values,
 and that encoding does not depend on the cached transaction ID. The encoder is
 checked against fixed bytes, rather than only against its own parser.
 
-There are 5 unit tests and 10 default-feature API integration tests, plus 2
+There are 8 unit tests and 10 default-feature API integration tests, plus 2
 encoder-feature integration tests. To run the release-profile variant locally,
 add `--release` to either command above. Fixtures are synthetic serialization
 samples, not proof fixtures or historical on-chain transaction evidence.
