@@ -213,7 +213,7 @@ checksum = "8b3b72a38c9920a29990df12002c4d069a147c8782f0c211f8a01b2df8f42bfd"
 [[package]]
 name = "ckb-bitcoin-spv-verifier"
 version = "0.1.0"
-source = "git+https://github.com/ckb-cell/ckb-bitcoin-spv.git?rev=a3c43fd5fb70044ad438f703212b255af5024476#a3c43fd5fb70044ad438f703212b255af5024476"
+source = "git+https://github.com/RGBPlusPlus/ckb-bitcoin-spv.git?rev=3f7a0ddf947b35c60ce6c63b7fef2005cb12d0af#3f7a0ddf947b35c60ce6c63b7fef2005cb12d0af"
 dependencies = [
  "bitcoin",
  "bitcoin_hashes",
@@ -1545,6 +1545,7 @@ dependencies = [
 name = "tests"
 version = "0.1.0"
 dependencies = [
+ "ckb-bitcoin-spv-verifier",
  "ckb-testtool",
  "rand 0.8.5",
  "rgbpp-core",
