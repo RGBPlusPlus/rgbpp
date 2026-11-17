@@ -16,6 +16,8 @@ mod btc_mock;
 #[cfg(test)]
 mod rgbpp;
 #[cfg(test)]
+mod spv;
+#[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod utils;
