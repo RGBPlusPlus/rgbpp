@@ -1,0 +1,34 @@
+name: Core API tests
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: core-api-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  core-tests:
+    name: Core (${{ matrix.features }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        features: [default, bitcoin-encoder]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        run: rustup toolchain install 1.100.0 --profile minimal --component rustfmt
+      - name: Core formatting
+        run: cargo +1.100.0 fmt -p rgbpp-core -- --check
+      - name: Unit and API integration tests (default features)
+        if: matrix.features == 'default'
+        run: cargo +1.100.0 test --locked -p rgbpp-core
+      - name: Unit and API integration tests (Bitcoin encoder)
+        if: matrix.features == 'bitcoin-encoder'
+        run: cargo +1.100.0 test --locked -p rgbpp-core --features bitcoin-encoder,molecule/std

@@ -21,3 +21,18 @@ impl Unpack<u16> for Uint16 {
         self.as_reader().unpack()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uint16_encoding_is_little_endian() {
+        let packed: Uint16 = 0x1234u16.pack();
+        assert_eq!(packed.as_slice(), &[0x34, 0x12]);
+        let entity: u16 = packed.unpack();
+        let reader: u16 = packed.as_reader().unpack();
+        assert_eq!(entity, 0x1234);
+        assert_eq!(reader, entity);
+    }
+}
