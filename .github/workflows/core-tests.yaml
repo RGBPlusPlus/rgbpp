@@ -11,13 +11,14 @@ concurrency:
 
 jobs:
   core-tests:
-    name: Core (${{ matrix.features }})
+    name: Core (${{ matrix.features }}, ${{ matrix.profile }})
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
         features: [default, bitcoin-encoder]
+        profile: [test, release]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -28,7 +29,7 @@ jobs:
         run: cargo +1.100.0 fmt -p rgbpp-core -- --check
       - name: Unit and API integration tests (default features)
         if: matrix.features == 'default'
-        run: cargo +1.100.0 test --locked -p rgbpp-core
+        run: cargo +1.100.0 test --locked --profile ${{ matrix.profile }} -p rgbpp-core
       - name: Unit and API integration tests (Bitcoin encoder)
         if: matrix.features == 'bitcoin-encoder'
-        run: cargo +1.100.0 test --locked -p rgbpp-core --features bitcoin-encoder,molecule/std
+        run: cargo +1.100.0 test --locked --profile ${{ matrix.profile }} -p rgbpp-core --features bitcoin-encoder,molecule/std
