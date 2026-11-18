@@ -74,6 +74,22 @@ fn proof_for(
     spv::SpvClient,
     spv::SpvUpdate,
 ) {
+    branch_proof(raw_tx, wrong_merkle_root, 0, CONFIRMATIONS + 1, 0)
+}
+
+// Branches differ at height 1; start_height selects an already accepted prefix.
+fn branch_proof(
+    raw_tx: &[u8],
+    wrong_merkle_root: bool,
+    time_offset: u32,
+    end_height: u32,
+    start_height: u32,
+) -> (
+    spv::SpvClient,
+    spv::TransactionProof,
+    spv::SpvClient,
+    spv::SpvUpdate,
+) {
     let genesis = genesis_block(Network::Regtest);
     let checkpoint = spv::SpvBootstrap::new_builder()
         .height(spv_traits::Pack::pack(&0u32))
@@ -85,7 +101,7 @@ fn proof_for(
     let mut block = genesis.clone();
     block.txdata = vec![deserialize(raw_tx).expect("fixture Bitcoin transaction")];
     block.header.prev_blockhash = genesis.block_hash();
-    block.header.time += 1;
+    block.header.time += 1 + time_offset;
     block.header.merkle_root = block.compute_merkle_root().unwrap();
     if wrong_merkle_root {
         block.header.merkle_root = bitcoin::TxMerkleNode::from_raw_hash(
@@ -101,7 +117,8 @@ fn proof_for(
     let mut header = block.header;
     let mut headers = Vec::new();
     let mut positions = Vec::new();
-    for height in 1..=CONFIRMATIONS + 1 {
+    let mut prefix = checkpoint.clone();
+    for height in 1..=end_height {
         if height > 1 {
             header.prev_blockhash = header.block_hash();
             header.time += 1;
@@ -114,6 +131,16 @@ fn proof_for(
             .unwrap(),
         );
         headers.push(header);
+        if height == start_height {
+            prefix = checkpoint
+                .clone()
+                .as_builder()
+                .headers_mmr_root(mmr.get_root().unwrap())
+                .tip_block_hash(spv_traits::Pack::pack(&spv_core::Hash::from(
+                    header.block_hash(),
+                )))
+                .build();
+        }
     }
     mmr.commit().unwrap();
     let client = checkpoint
@@ -125,11 +152,13 @@ fn proof_for(
         )))
         .build();
     let update = spv::SpvUpdate::new_builder()
-        .headers(spv_traits::Pack::pack(&headers))
+        .headers(spv_traits::Pack::pack(
+            &headers[start_height as usize..].to_vec(),
+        ))
         .new_headers_mmr_proof(
             spv::MmrProof::new_builder()
                 .set(
-                    mmr.gen_proof(positions.clone())
+                    mmr.gen_proof(positions[start_height as usize..].to_vec())
                         .unwrap()
                         .proof_items()
                         .to_vec(),
@@ -137,7 +166,7 @@ fn proof_for(
                 .build(),
         )
         .build();
-    checkpoint
+    prefix
         .verify_new_client(&client, update.clone(), 0)
         .unwrap_or_else(|e| panic!("fixture client update {}", e as i8));
     let proof = spv::TransactionProof::new_builder()
@@ -157,7 +186,7 @@ fn proof_for(
                 .build(),
         )
         .build();
-    (client, proof, checkpoint, update)
+    (client, proof, prefix, update)
 }
 
 fn witness(tx: &TransactionView) -> WitnessArgs {
@@ -717,4 +746,281 @@ fn rejected_spv_update_does_not_publish_a_client_for_consumption() {
         .index(1u32.pack())
         .build();
     assert!(f.context.get_cell(&proposed).is_none());
+}
+
+// Only materialize outputs after the complete type-script transition succeeds.
+fn apply_transition(context: &mut Context, tx: &TransactionView) -> Vec<OutPoint> {
+    context
+        .verify_tx(tx, MAX_CYCLES)
+        .expect("SPV transition passes in VM");
+    tx.outputs()
+        .into_iter()
+        .zip(tx.outputs_data())
+        .enumerate()
+        .map(|(index, (cell, data))| {
+            let out_point = OutPoint::new_builder()
+                .tx_hash(tx.hash())
+                .index((index as u32).pack())
+                .build();
+            context.create_cell_with_out_point(out_point.clone(), cell, data.raw_data());
+            out_point
+        })
+        .collect()
+}
+
+#[test]
+fn vm_verified_reorg_outputs_are_consumed_by_both_locks() {
+    for kind in [Lock::Rgbpp, Lock::BtcTime] {
+        let mut f = fixture_with_update(kind, true);
+        let first = f.transition.as_ref().unwrap();
+        let first_tx = first.tx.clone();
+        let checkpoint_out = first.old_tip.clone();
+        let first_outputs = apply_transition(&mut f.context, &first_tx);
+        let template = first_tx.outputs().get(0).unwrap();
+        let (_, checkpoint_data) = f.context.get_cell(&checkpoint_out).unwrap();
+        let checkpoint = spv::SpvClient::from_slice(&checkpoint_data).unwrap();
+        // Slot 2 is part of the explicitly trusted initial checkpoint state.
+        let slot2 = f.context.create_cell(
+            template.clone(),
+            checkpoint
+                .clone()
+                .as_builder()
+                .id(2u8.into())
+                .build()
+                .as_bytes(),
+        );
+        let (old_tip, old_proof, _, second_update) =
+            branch_proof(&f.raw_tx, false, 0, CONFIRMATIONS + 2, CONFIRMATIONS + 1);
+        let old_tip = old_tip.as_builder().id(2u8.into()).build();
+        let second_tx = Transaction::default()
+            .as_advanced_builder()
+            .inputs(vec![
+                CellInput::new_builder()
+                    .previous_output(first_outputs[0].clone())
+                    .build(),
+                CellInput::new_builder().previous_output(slot2).build(),
+            ])
+            .outputs(vec![template.clone(), template.clone()])
+            .outputs_data(vec![
+                spv::SpvInfo::new_builder()
+                    .tip_client_id(2u8.into())
+                    .build()
+                    .as_bytes()
+                    .pack(),
+                old_tip.as_bytes().pack(),
+            ])
+            .cell_dep(
+                CellDep::new_builder()
+                    .out_point(first_outputs[1].clone())
+                    .build(),
+            )
+            .witness(
+                WitnessArgs::new_builder()
+                    .output_type(Some(second_update.as_bytes()).pack())
+                    .build()
+                    .as_bytes()
+                    .pack(),
+            )
+            .build();
+        let second_tx = f.context.complete_tx(second_tx);
+        let second_outputs = apply_transition(&mut f.context, &second_tx);
+        // Competing branch starts at the retained checkpoint and has strictly more work.
+        let (new_tip, new_proof, _, reorg_update) =
+            branch_proof(&f.raw_tx, false, 100, CONFIRMATIONS + 3, 0);
+        let reorg_tx = Transaction::default()
+            .as_advanced_builder()
+            .inputs(
+                vec![
+                    second_outputs[0].clone(),
+                    second_outputs[1].clone(),
+                    first_outputs[1].clone(),
+                ]
+                .into_iter()
+                .map(|out| CellInput::new_builder().previous_output(out).build())
+                .collect::<Vec<_>>(),
+            )
+            .outputs(vec![template.clone(); 3])
+            .outputs_data(vec![
+                spv::SpvInfo::new_builder()
+                    .tip_client_id(1u8.into())
+                    .build()
+                    .as_bytes()
+                    .pack(),
+                new_tip
+                    .clone()
+                    .as_builder()
+                    .id(2u8.into())
+                    .build()
+                    .as_bytes()
+                    .pack(),
+                new_tip
+                    .as_builder()
+                    .id(1u8.into())
+                    .build()
+                    .as_bytes()
+                    .pack(),
+            ])
+            .cell_dep(CellDep::new_builder().out_point(checkpoint_out).build())
+            .witness(
+                WitnessArgs::new_builder()
+                    .output_type(Some(reorg_update.as_bytes()).pack())
+                    .build()
+                    .as_bytes()
+                    .pack(),
+            )
+            .build();
+        let reorg_tx = f.context.complete_tx(reorg_tx);
+        let reorg_outputs = apply_transition(&mut f.context, &reorg_tx);
+        let consumer = |proof: &spv::TransactionProof, client: &OutPoint| {
+            let deps =
+                f.tx.cell_deps()
+                    .into_iter()
+                    .map(|dep| {
+                        if dep.out_point() == f.scripts.btc_spv.btc_lc {
+                            dep.as_builder().out_point(client.clone()).build()
+                        } else {
+                            dep
+                        }
+                    })
+                    .collect();
+            with_proof(&f.tx, kind, proof.as_bytes())
+                .as_advanced_builder()
+                .set_cell_deps(deps)
+                .build()
+        };
+        // The old proof is valid against the pre-reorg client, not a malformed fixture.
+        f.passes(&consumer(&old_proof, &second_outputs[1]));
+        f.fails(
+            &consumer(&new_proof, &second_outputs[1]),
+            Error::SpvProofIncorrect,
+        );
+        for client in &reorg_outputs[1..] {
+            f.passes(&consumer(&new_proof, client));
+            f.fails(&consumer(&old_proof, client), Error::SpvProofIncorrect);
+        }
+    }
+}
+
+fn config_out_point(f: &Fixture, kind: Lock) -> OutPoint {
+    match kind {
+        Lock::Rgbpp => f.scripts.app.rgbpp.config_out_point.clone(),
+        Lock::BtcTime => f.scripts.app.btc_time_lock.config_out_point.clone(),
+    }
+}
+
+#[test]
+fn config_lookup_accepts_reordered_code_dependencies() {
+    for kind in [Lock::Rgbpp, Lock::BtcTime] {
+        let f = fixture(kind);
+        let mut deps: Vec<_> = f.tx.cell_deps().into_iter().collect();
+        deps.reverse();
+        f.passes(&f.tx.as_advanced_builder().set_cell_deps(deps).build());
+    }
+}
+
+#[test]
+fn config_lookup_requires_the_matching_deployment_output() {
+    for kind in [Lock::Rgbpp, Lock::BtcTime] {
+        let mut f = fixture(kind);
+        let config = config_out_point(&f, kind);
+        let deps: Vec<_> =
+            f.tx.cell_deps()
+                .into_iter()
+                .filter(|dep| dep.out_point() != config)
+                .collect();
+        f.fails(
+            &f.tx.as_advanced_builder().set_cell_deps(deps).build(),
+            Error::ConfigNotFound,
+        );
+        let (cell, data) = f.context.get_cell(&config).unwrap();
+        // Valid config bytes at the wrong output must not satisfy lookup.
+        let wrong_output = config.clone().as_builder().index(2u32.pack()).build();
+        f.context
+            .create_cell_with_out_point(wrong_output.clone(), cell.clone(), data.clone());
+        // Nor may an unrelated deployment's output 1 supply the config.
+        let wrong_deployment = config
+            .clone()
+            .as_builder()
+            .tx_hash([0x57u8; 32].pack())
+            .build();
+        f.context
+            .create_cell_with_out_point(wrong_deployment.clone(), cell, data);
+        for replacement in [wrong_output, wrong_deployment] {
+            let deps: Vec<_> =
+                f.tx.cell_deps()
+                    .into_iter()
+                    .map(|dep| {
+                        if dep.out_point() == config {
+                            dep.as_builder().out_point(replacement.clone()).build()
+                        } else {
+                            dep
+                        }
+                    })
+                    .collect();
+            f.fails(
+                &f.tx.as_advanced_builder().set_cell_deps(deps).build(),
+                Error::ConfigNotFound,
+            );
+        }
+    }
+}
+
+#[test]
+fn config_lookup_rejects_malformed_config_data() {
+    for kind in [Lock::Rgbpp, Lock::BtcTime] {
+        let mut f = fixture(kind);
+        let config = config_out_point(&f, kind);
+        let (cell, _) = f.context.get_cell(&config).unwrap();
+        f.context
+            .create_cell_with_out_point(config, cell, Bytes::from_static(&[0x42]));
+        f.fails(&f.tx, Error::ConfigMalformed);
+    }
+}
+
+#[test]
+fn config_lookup_requires_code_and_config_before_dep_groups() {
+    for kind in [Lock::Rgbpp, Lock::BtcTime] {
+        let mut f = fixture(kind);
+        let config = config_out_point(&f, kind);
+        let (cell, _) = f.context.get_cell(&config).unwrap();
+        let unrelated = f
+            .context
+            .create_cell(cell.clone(), Bytes::from_static(b"unrelated dependency"));
+        let group_data = OutPointVec::new_builder()
+            .push(unrelated)
+            .build()
+            .as_bytes();
+        let group = f.context.create_cell(cell, group_data);
+        let group_dep = CellDep::new_builder()
+            .out_point(group)
+            .dep_type(1u8.into())
+            .build();
+        let mut deps: Vec<_> = f.tx.cell_deps().into_iter().collect();
+        deps.push(group_dep.clone());
+        f.passes(&f.tx.as_advanced_builder().set_cell_deps(deps).build());
+        let mut deps: Vec<_> = f.tx.cell_deps().into_iter().collect();
+        deps.insert(0, group_dep.clone());
+        f.fails(
+            &f.tx.as_advanced_builder().set_cell_deps(deps).build(),
+            Error::ConfigNotFound,
+        );
+        // The code lookup succeeds here; the config lookup must separately reject
+        // a config placed after a dep-group.
+        let config_dep =
+            f.tx.cell_deps()
+                .into_iter()
+                .find(|dep| dep.out_point() == config)
+                .unwrap();
+        let mut deps: Vec<_> =
+            f.tx.cell_deps()
+                .into_iter()
+                .filter(|dep| dep.out_point() != config)
+                .collect();
+        deps.push(group_dep);
+        deps.push(config_dep);
+        f.fails(
+            &f.tx.as_advanced_builder().set_cell_deps(deps).build(),
+            Error::ConfigNotFound,
+        );
+    }
 }
