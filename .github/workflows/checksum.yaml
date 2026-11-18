@@ -39,8 +39,8 @@ jobs:
           sha256sum build/release/btc-time-lock build/release/rgbpp-lock > build-evidence/second.sha256
           diff -u build-evidence/first.sha256 build-evidence/second.sha256
           sha256sum -c checksums.txt
-          git diff --exit-code -- Cargo.lock checksums.txt
         ' 2>&1 | tee build-evidence/build.log
+        git diff --exit-code -- Cargo.lock checksums.txt
     - name: Upload production artifacts and build evidence
       if: always()
       uses: actions/upload-artifact@v4
