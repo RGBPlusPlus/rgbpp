@@ -12,6 +12,8 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 #[cfg(test)]
+mod behavior;
+#[cfg(test)]
 mod btc_mock;
 #[cfg(test)]
 mod rgbpp;
