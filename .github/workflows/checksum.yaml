@@ -39,7 +39,16 @@ jobs:
           sha256sum build/release/btc-time-lock build/release/rgbpp-lock > build-evidence/second.sha256
           diff -u build-evidence/first.sha256 build-evidence/second.sha256
           sha256sum -c checksums.txt
+          mkdir -p build/non-mock
+          cp build/release/btc-time-lock build/release/rgbpp-lock build/non-mock/
         ' 2>&1 | tee build-evidence/build.log
+        git diff --exit-code -- Cargo.lock checksums.txt
+    - name: Test checksummed production contracts in CKB-VM
+      env:
+        CARGO_TARGET_DIR: ${{ runner.temp }}/non-mock-host
+      run: |
+        set -euo pipefail
+        cargo test --locked -p tests --features non-mock-spv-tests --test non_mock_spv -- --nocapture 2>&1 | tee build-evidence/non-mock-vm.log
         git diff --exit-code -- Cargo.lock checksums.txt
     - name: Upload production artifacts and build evidence
       if: always()
