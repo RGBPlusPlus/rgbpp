@@ -44,7 +44,11 @@ pub struct OutputDesc {
     pub amount: u128,
 }
 
-fn set_cell_btc_txid(scripts: &TestScripts, output: CellOutput, btc_txid: Byte32) -> CellOutput {
+pub(crate) fn set_cell_btc_txid(
+    scripts: &TestScripts,
+    output: CellOutput,
+    btc_txid: Byte32,
+) -> CellOutput {
     let lock = output.lock();
     match lock.code_hash() {
         code_hash if code_hash == scripts.app.rgbpp.type_hash => {
@@ -94,7 +98,7 @@ fn clear_cell_btc_txid(scripts: &TestScripts, output: CellOutput) -> CellOutput 
     }
 }
 
-fn gen_commitment(
+pub(crate) fn gen_commitment(
     scripts: &TestScripts,
     rgbpp_tx: &TransactionView,
     extra_data: &ExtraCommitmentData,

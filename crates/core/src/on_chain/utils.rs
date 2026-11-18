@@ -106,3 +106,30 @@ pub fn load_config<Config: Entity>(tx: &TransactionReader) -> Result<Config, Err
     let config = Config::from_slice(&data).map_err(|_| Error::ConfigMalformed)?;
     Ok(config)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dependency_type_tags_match_ckb_serialization() {
+        assert!(matches!(byte_to_dep_type(0), Some(DepType::Code)));
+        assert!(matches!(byte_to_dep_type(1), Some(DepType::DepGroup)));
+        for tag in 2..=u8::MAX {
+            assert!(byte_to_dep_type(tag).is_none());
+        }
+    }
+
+    #[test]
+    fn script_hash_type_tags_match_ckb_serialization() {
+        assert_eq!(byte_to_script_hash_type(0), Some(ScriptHashType::Data));
+        assert_eq!(byte_to_script_hash_type(1), Some(ScriptHashType::Type));
+        assert_eq!(byte_to_script_hash_type(2), Some(ScriptHashType::Data1));
+        assert_eq!(byte_to_script_hash_type(4), Some(ScriptHashType::Data2));
+        for tag in 0..=u8::MAX {
+            if ![0, 1, 2, 4].contains(&tag) {
+                assert!(byte_to_script_hash_type(tag).is_none());
+            }
+        }
+    }
+}

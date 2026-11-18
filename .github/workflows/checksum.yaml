@@ -19,6 +19,14 @@ jobs:
       with:
         submodules: true
         persist-credentials: false
+    - name: Checkout pinned SPV type-script test dependency
+      uses: actions/checkout@v4
+      with:
+        repository: RGBPlusPlus/ckb-bitcoin-spv-contracts
+        ref: 0ebc91158c241c514ad670971730515e4e4e39cc
+        path: build/spv-contracts-src
+        submodules: true
+        persist-credentials: false
     - name: Record source and build environment
       run: |
         mkdir -p build-evidence
@@ -39,7 +47,28 @@ jobs:
           sha256sum build/release/btc-time-lock build/release/rgbpp-lock > build-evidence/second.sha256
           diff -u build-evidence/first.sha256 build-evidence/second.sha256
           sha256sum -c checksums.txt
+          mkdir -p build/non-mock
+          cp build/release/btc-time-lock build/release/rgbpp-lock build/non-mock/
         ' 2>&1 | tee build-evidence/build.log
+        git diff --exit-code -- Cargo.lock checksums.txt
+    - name: Build pinned SPV type-script test dependency
+      run: |
+        set -euo pipefail
+        git -C build/spv-contracts-src rev-parse HEAD | tee build-evidence/spv-contract-source.txt
+        git -C build/spv-contracts-src submodule status | tee build-evidence/spv-contract-submodules.txt
+        docker run --rm -v "$PWD:/code" "$BUILD_IMAGE" bash -euc '
+          cd /code/build/spv-contracts-src
+          make build CONTRACT=ckb-bitcoin-spv-type-lock MODE=release CARGO_ARGS=--locked
+          cp build/release/ckb-bitcoin-spv-type-lock /code/build/non-mock/
+          sha256sum build/release/ckb-bitcoin-spv-type-lock > /code/build-evidence/spv-contract.sha256
+        ' 2>&1 | tee build-evidence/spv-contract-build.log
+        git -C build/spv-contracts-src diff --exit-code -- Cargo.lock
+    - name: Test checksummed production contracts in CKB-VM
+      env:
+        CARGO_TARGET_DIR: ${{ runner.temp }}/non-mock-host
+      run: |
+        set -euo pipefail
+        cargo test --locked -p tests --features non-mock-spv-tests --test non_mock_spv -- --nocapture 2>&1 | tee build-evidence/non-mock-vm.log
         git diff --exit-code -- Cargo.lock checksums.txt
     - name: Upload production artifacts and build evidence
       if: always()
@@ -49,6 +78,7 @@ jobs:
         path: |
           build/release/btc-time-lock
           build/release/rgbpp-lock
+          build/non-mock/ckb-bitcoin-spv-type-lock
           checksums.txt
           build-evidence/
         if-no-files-found: error

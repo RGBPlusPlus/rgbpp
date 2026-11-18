@@ -12,6 +12,8 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 #[cfg(test)]
+mod behavior;
+#[cfg(test)]
 mod btc_mock;
 #[cfg(test)]
 mod rgbpp;
@@ -56,6 +58,11 @@ impl Default for Loader {
 }
 
 impl Loader {
+    /// Select an isolated contract build directory for integration suites.
+    pub fn from_dir(path: PathBuf) -> Self {
+        Self(path)
+    }
+
     fn with_test_env(env: TestEnv) -> Self {
         let load_prefix = match env {
             TestEnv::Debug => "debug",

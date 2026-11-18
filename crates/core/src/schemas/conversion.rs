@@ -21,3 +21,30 @@ impl Unpack<u16> for Uint16 {
         self.as_reader().unpack()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uint16_encoding_is_little_endian() {
+        let packed: Uint16 = 0x1234u16.pack();
+        assert_eq!(packed.as_slice(), &[0x34, 0x12]);
+        let entity: u16 = packed.unpack();
+        let reader: u16 = packed.as_reader().unpack();
+        assert_eq!(entity, 0x1234);
+        assert_eq!(reader, entity);
+    }
+
+    #[test]
+    fn uint16_entity_and_reader_roundtrip_every_value() {
+        for value in u16::MIN..=u16::MAX {
+            let packed: Uint16 = value.pack();
+            assert_eq!(packed.as_slice(), &value.to_le_bytes());
+            let entity: u16 = packed.unpack();
+            let reader: u16 = packed.as_reader().unpack();
+            assert_eq!(entity, value);
+            assert_eq!(reader, value);
+        }
+    }
+}

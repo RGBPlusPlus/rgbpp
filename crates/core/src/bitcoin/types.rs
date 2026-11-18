@@ -33,3 +33,18 @@ pub struct BTCTx {
     pub outputs: Vec<TxOut>,
     pub lock_time: u32,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn seal_output_preserves_value_and_message() {
+        let message = [0x42; 32];
+        let output = TxOut::new_seal(1234, message);
+        assert_eq!(output.value, 1234);
+        assert_eq!(output.script.len(), 34);
+        assert_eq!(&output.script[..2], &[0x6a, 0x20]);
+        assert_eq!(&output.script[2..], &message);
+    }
+}

@@ -12,3 +12,14 @@ rand = "0.8"
 ckb-bitcoin-spv-verifier = { git = "https://github.com/RGBPlusPlus/ckb-bitcoin-spv.git", rev = "3f7a0ddf947b35c60ce6c63b7fef2005cb12d0af", default-features = false, features = [
   "no-std",
 ] }
+
+[features]
+non-mock-spv-tests = ["dep:bitcoin"]
+
+[dependencies.bitcoin]
+version = "0.31"
+optional = true
+
+[[test]]
+name = "non_mock_spv"
+required-features = ["non-mock-spv-tests"]
