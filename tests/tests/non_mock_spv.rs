@@ -1,9 +1,10 @@
 //! Offline CKB-VM integration of production locks and their real SPV verifier.
 //!
 //! These are isolated easy-target chains rooted at a trusted regtest checkpoint,
-//! not public Bitcoin transactions or a test of SPV type-script state admission.
-//! Client updates are checked by the host verifier while constructing fixtures;
-//! transaction inclusion, cell-dep lookup and lock semantics run inside CKB-VM.
+//! not public Bitcoin transactions or a test of initial checkpoint admission.
+//! Snapshot tests check client updates on the host; composed cases also validate
+//! the SPV type-script update in CKB-VM before publishing its output for the locks.
+//! Transaction inclusion, cell-dep lookup and lock semantics run inside CKB-VM.
 use bitcoin::{
     blockdata::constants::genesis_block,
     consensus::{deserialize, serialize},
@@ -51,6 +52,7 @@ struct Fixture {
     proof: spv::TransactionProof,
     client: spv::SpvClient,
     raw_tx: Vec<u8>,
+    transition: Option<ClientTransition>,
 }
 
 fn mine(mut header: spv_core::Header) -> spv_core::Header {
@@ -63,7 +65,15 @@ fn mine(mut header: spv_core::Header) -> spv_core::Header {
     panic!("bounded easy-target fixture generation failed");
 }
 
-fn proof_for(raw_tx: &[u8], wrong_merkle_root: bool) -> (spv::SpvClient, spv::TransactionProof) {
+fn proof_for(
+    raw_tx: &[u8],
+    wrong_merkle_root: bool,
+) -> (
+    spv::SpvClient,
+    spv::TransactionProof,
+    spv::SpvClient,
+    spv::SpvUpdate,
+) {
     let genesis = genesis_block(Network::Regtest);
     let checkpoint = spv::SpvBootstrap::new_builder()
         .height(spv_traits::Pack::pack(&0u32))
@@ -128,7 +138,7 @@ fn proof_for(raw_tx: &[u8], wrong_merkle_root: bool) -> (spv::SpvClient, spv::Tr
         )
         .build();
     checkpoint
-        .verify_new_client(&client, update, 0)
+        .verify_new_client(&client, update.clone(), 0)
         .unwrap_or_else(|e| panic!("fixture client update {}", e as i8));
     let proof = spv::TransactionProof::new_builder()
         .height(spv_traits::Pack::pack(&1u32))
@@ -147,7 +157,7 @@ fn proof_for(raw_tx: &[u8], wrong_merkle_root: bool) -> (spv::SpvClient, spv::Tr
                 .build(),
         )
         .build();
-    (client, proof)
+    (client, proof, checkpoint, update)
 }
 
 fn witness(tx: &TransactionView) -> WitnessArgs {
@@ -182,20 +192,32 @@ fn with_proof(tx: &TransactionView, kind: Lock, proof: Bytes) -> TransactionView
 }
 
 fn fixture(kind: Lock) -> Fixture {
+    fixture_with_update(kind, false)
+}
+
+fn fixture_with_update(kind: Lock, verify_update_in_vm: bool) -> Fixture {
     // Never fall back to build/release: that directory contains mock binaries in
     // the existing suite. The non-mock CI job builds this directory separately.
     let loader = Loader::from_dir(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../build/non-mock"),
     );
     let mut context = Context::default();
-    let spv_type = random_type_id_script();
+    let spv_type = if verify_update_in_vm {
+        let code = context.deploy_cell(loader.load_binary("ckb-bitcoin-spv-type-lock"));
+        let args = spv::SpvTypeArgs::new_builder()
+            .clients_count(3u8.into())
+            .build();
+        context.build_script(&code, args.as_bytes()).unwrap()
+    } else {
+        random_type_id_script()
+    };
     let spv_cell = context.create_cell(
         CellOutput::new_builder()
             .type_(Some(spv_type.clone()).pack())
             .build(),
         Bytes::new(),
     );
-    let scripts = utils::TestScripts {
+    let mut scripts = utils::TestScripts {
         app: utils::deploy_rgbpp_scripts(&loader, &mut context, spv_type.calc_script_hash()),
         sudt: utils::deploy_sudt_scripts(&loader, &mut context),
         btc_spv: utils::BTCLCScripts {
@@ -240,12 +262,33 @@ fn fixture(kind: Lock) -> Fixture {
             data,
         );
     }
-    let (client, proof) = proof_for(&raw_tx, false);
-    let (cell, _) = context.get_cell(&spv_cell).unwrap();
-    context.create_cell_with_out_point(spv_cell.clone(), cell, client.as_bytes());
+    let (mut client, proof, checkpoint, update) = proof_for(&raw_tx, false);
+    let transition = if verify_update_in_vm {
+        client = client.as_builder().id(1u8.into()).build();
+        let transition = client_transition(
+            &mut context,
+            &loader,
+            &spv_type,
+            checkpoint,
+            &client,
+            update,
+        );
+        let output = apply_client_update(&mut context, &transition.tx)
+            .expect("SPV type-script update passes in VM");
+        scripts.btc_spv.btc_lc = output;
+        Some(transition)
+    } else {
+        let (cell, _) = context.get_cell(&spv_cell).unwrap();
+        context.create_cell_with_out_point(spv_cell.clone(), cell, client.as_bytes());
+        None
+    };
     let tx = with_proof(&tx, kind, proof.as_bytes())
         .as_advanced_builder()
-        .cell_dep(CellDep::new_builder().out_point(spv_cell).build())
+        .cell_dep(
+            CellDep::new_builder()
+                .out_point(scripts.btc_spv.btc_lc.clone())
+                .build(),
+        )
         .build();
     let tx = context.complete_tx(tx);
     let fixture = Fixture {
@@ -255,6 +298,7 @@ fn fixture(kind: Lock) -> Fixture {
         proof,
         client,
         raw_tx,
+        transition,
     };
     fixture.passes(&fixture.tx);
     fixture
@@ -517,11 +561,160 @@ fn merkle_root_must_match_the_transaction_proof() {
         let mut f = fixture(kind);
         // Bind the client MMR to this changed header too: otherwise the MMR
         // check could mask a missing transaction-Merkle check.
-        let (client, proof) = proof_for(&f.raw_tx, true);
+        let (client, proof, _, _) = proof_for(&f.raw_tx, true);
         f.replace_client(client.as_bytes());
         f.fails(
             &with_proof(&f.tx, kind, proof.as_bytes()),
             Error::SpvProofIncorrect,
         );
     }
+}
+
+struct ClientTransition {
+    tx: TransactionView,
+    old_tip: OutPoint,
+    type_script: Script,
+}
+
+// Start from an explicitly trusted checkpoint and the next client slot. Only
+// the type script (not a node, network or operator's authorization lock) is under
+// test here; always_success isolates the unrelated ownership lock.
+fn client_transition(
+    context: &mut Context,
+    loader: &Loader,
+    type_script: &Script,
+    checkpoint: spv::SpvClient,
+    client: &spv::SpvClient,
+    update: spv::SpvUpdate,
+) -> ClientTransition {
+    let lock_code = context.deploy_cell(loader.load_tests_binary("always_success"));
+    let lock = context.build_script(&lock_code, Bytes::new()).unwrap();
+    let cell = CellOutput::new_builder()
+        .capacity(500_0000_0000u64.pack())
+        .lock(lock)
+        .type_(Some(type_script.clone()).pack())
+        .build();
+    let old_tip = context.create_cell(cell.clone(), checkpoint.as_bytes());
+    let input_info = context.create_cell(cell.clone(), spv::SpvInfo::default().as_bytes());
+    let input_client = context.create_cell(
+        cell.clone(),
+        checkpoint.as_builder().id(1u8.into()).build().as_bytes(),
+    );
+    let output_info = spv::SpvInfo::new_builder()
+        .tip_client_id(1u8.into())
+        .build();
+    let witness = WitnessArgs::new_builder()
+        .output_type(Some(update.as_bytes()).pack())
+        .build();
+    let tx = Transaction::default()
+        .as_advanced_builder()
+        .inputs(vec![
+            CellInput::new_builder().previous_output(input_info).build(),
+            CellInput::new_builder()
+                .previous_output(input_client)
+                .build(),
+        ])
+        .outputs(vec![cell.clone(), cell])
+        .outputs_data(vec![
+            output_info.as_bytes().pack(),
+            client.as_bytes().pack(),
+        ])
+        .cell_dep(CellDep::new_builder().out_point(old_tip.clone()).build())
+        .witness(witness.as_bytes().pack())
+        .build();
+    ClientTransition {
+        tx: context.complete_tx(tx),
+        old_tip,
+        type_script: type_script.clone(),
+    }
+}
+
+fn apply_client_update(
+    context: &mut Context,
+    tx: &TransactionView,
+) -> Result<OutPoint, ckb_testtool::ckb_error::Error> {
+    let cycles = context.verify_tx(tx, MAX_CYCLES)?;
+    println!("SPV type-script update cycles: {cycles}");
+    // Materialize the exact verified output, never a separately injected copy.
+    // In particular, failed updates cannot make their proposed client available.
+    let out_point = OutPoint::new_builder()
+        .tx_hash(tx.hash())
+        .index(1u32.pack())
+        .build();
+    context.create_cell_with_out_point(
+        out_point.clone(),
+        tx.outputs().get(1).unwrap(),
+        tx.outputs_data().get(1).unwrap().raw_data(),
+    );
+    Ok(out_point)
+}
+
+#[test]
+fn vm_verified_client_update_is_consumed_by_both_rgbpp_locks() {
+    for kind in [Lock::Rgbpp, Lock::BtcTime] {
+        let f = fixture_with_update(kind, true);
+        let transition = f.transition.as_ref().unwrap();
+        assert_eq!(f.scripts.btc_spv.btc_lc.tx_hash(), transition.tx.hash());
+        assert_eq!(
+            f.context.get_cell(&f.scripts.btc_spv.btc_lc).unwrap().1,
+            transition.tx.outputs_data().get(1).unwrap().raw_data()
+        );
+        // The same proof must fail against the checkpoint and pass only after
+        // the actual accepted update output is selected by the consuming lock.
+        let deps =
+            f.tx.cell_deps()
+                .into_iter()
+                .map(|dep| {
+                    if dep.out_point() == f.scripts.btc_spv.btc_lc {
+                        dep.as_builder()
+                            .out_point(transition.old_tip.clone())
+                            .build()
+                    } else {
+                        dep
+                    }
+                })
+                .collect();
+        f.fails(
+            &f.tx.as_advanced_builder().set_cell_deps(deps).build(),
+            Error::SpvProofIncorrect,
+        );
+    }
+}
+
+#[test]
+fn rejected_spv_update_does_not_publish_a_client_for_consumption() {
+    let mut f = fixture_with_update(Lock::Rgbpp, true);
+    let transition = f.transition.as_ref().unwrap();
+    let bad_client = f
+        .client
+        .clone()
+        .as_builder()
+        .tip_block_hash(spv_traits::Pack::pack(
+            &<spv_core::Hash as spv_traits::Hash>::hash(b"wrong tip"),
+        ))
+        .build();
+    let bad_tx = transition
+        .tx
+        .as_advanced_builder()
+        .set_outputs_data(vec![
+            transition.tx.outputs_data().get(0).unwrap(),
+            bad_client.as_bytes().pack(),
+        ])
+        .build();
+    let expected = ScriptError::validation_failure(
+        &transition.type_script,
+        0x60 + ckb_bitcoin_spv_verifier::error::UpdateError::ClientTipBlockHash as i8,
+    )
+    .input_type_script(0);
+    let error = apply_client_update(&mut f.context, &bad_tx)
+        .expect_err("invalid client update rejected by actual SPV type script");
+    assert_eq!(
+        error.root_cause().downcast_ref::<TransactionScriptError>(),
+        Some(&expected)
+    );
+    let proposed = OutPoint::new_builder()
+        .tx_hash(bad_tx.hash())
+        .index(1u32.pack())
+        .build();
+    assert!(f.context.get_cell(&proposed).is_none());
 }
