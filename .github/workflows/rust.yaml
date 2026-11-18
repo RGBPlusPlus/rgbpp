@@ -1,6 +1,9 @@
 name: Rust
 
-on: [push, pull_request]
+on: [push, pull_request, workflow_dispatch]
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -8,18 +11,20 @@ env:
 jobs:
   ubuntu-build:
 
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
       with:
         submodules: true
-    - name: Install llvm 16
-      run: wget https://apt.llvm.org/llvm.sh && chmod +x llvm.sh && sudo ./llvm.sh 16 && rm llvm.sh
+        persist-credentials: false
+    - name: Install clang 18 from Ubuntu packages
+      run: sudo apt-get update && sudo apt-get install -y clang-18
     - name: Install riscv64 target
       run: rustup target add riscv64imac-unknown-none-elf
-    - name: Build test binaries
-      run: make build CARGO_ARGS="--features=rgbpp-core/mock-bitcoin-light-client"
-    - name: Run all checks
-      run: make test check clippy
+    - name: Build mock-light-client test binaries
+      run: make build CLANG=clang-18 CUSTOM_RUSTFLAGS="-C debug-assertions=yes" CARGO_ARGS="--locked --features=rgbpp-core/mock-bitcoin-light-client"
+    - name: Run host tests, mock contract tests, and static checks
+      run: make test check clippy CARGO_ARGS=--locked
 

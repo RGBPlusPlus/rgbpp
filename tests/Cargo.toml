@@ -8,3 +8,7 @@ ckb-testtool = "0.10.2"
 serde_json = "1.0"
 rgbpp-core = { path = "../crates/core", features = ["bitcoin-encoder"] }
 rand = "0.8"
+# Keep in sync with crates/core: the tests in src/spv.rs must exercise what the contracts link.
+ckb-bitcoin-spv-verifier = { git = "https://github.com/RGBPlusPlus/ckb-bitcoin-spv.git", rev = "3f7a0ddf947b35c60ce6c63b7fef2005cb12d0af", default-features = false, features = [
+  "no-std",
+] }

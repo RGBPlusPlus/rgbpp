@@ -1545,6 +1545,7 @@ dependencies = [
 name = "tests"
 version = "0.1.0"
 dependencies = [
+ "ckb-bitcoin-spv-verifier",
  "ckb-testtool",
  "rand 0.8.5",
  "rgbpp-core",

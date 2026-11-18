@@ -1,20 +1,54 @@
 name: Checksum
 
-on: [push, pull_request]
+on: [push, pull_request, workflow_dispatch]
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
+  BUILD_IMAGE: docker.io/xxuejie/rust-n-llvm@sha256:71e98a25eb0350c779cdea18c296d101c4ddc375b8fd96531b63f3105ca64ca2
 
 jobs:
   ubuntu-build:
-
+    name: Non-mock release reproducibility and checksums
     runs-on: ubuntu-latest
-
+    timeout-minutes: 30
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
       with:
         submodules: true
-    - name: Build binaries
-      run: make docker-build
-    - name: Checksum
-      run: git diff --exit-code checksums.txt
+        persist-credentials: false
+    - name: Record source and build environment
+      run: |
+        mkdir -p build-evidence
+        git rev-parse HEAD | tee build-evidence/commit.txt
+        git submodule status | tee build-evidence/submodules.txt
+        echo "$BUILD_IMAGE" | tee build-evidence/image.txt
+        docker run --rm -v "$PWD:/code" "$BUILD_IMAGE" bash -euc 'cd /code; rustc -Vv; cargo -V; "$(scripts/find_clang)" --version' | tee build-evidence/toolchain.txt
+    - name: Build production contracts twice and verify committed checksums
+      shell: bash
+      run: |
+        set -euo pipefail
+        docker run --rm -v "$PWD:/code" "$BUILD_IMAGE" bash -euc '
+          cd /code
+          make build MODE=release CARGO_ARGS=--locked
+          sha256sum build/release/btc-time-lock build/release/rgbpp-lock > build-evidence/first.sha256
+          cargo clean
+          make build MODE=release CARGO_ARGS=--locked
+          sha256sum build/release/btc-time-lock build/release/rgbpp-lock > build-evidence/second.sha256
+          diff -u build-evidence/first.sha256 build-evidence/second.sha256
+          sha256sum -c checksums.txt
+        ' 2>&1 | tee build-evidence/build.log
+        git diff --exit-code -- Cargo.lock checksums.txt
+    - name: Upload production artifacts and build evidence
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: production-build-${{ github.sha }}
+        path: |
+          build/release/btc-time-lock
+          build/release/rgbpp-lock
+          checksums.txt
+          build-evidence/
+        if-no-files-found: error
