@@ -9,6 +9,22 @@ RGB++ scripts
 make build
 ```
 
+### Verified CI builds and releases
+
+After the reproducibility and non-mock CKB-VM checks pass, the
+[Checksum workflow](https://github.com/RGBPlusPlus/rgbpp/actions/workflows/checksum.yaml)
+uploads `contract-binaries-<commit-sha>` with `rgbpp-lock`, `btc-time-lock`,
+`SHA256SUMS`, and a `manifest.json` recording the source commit, pinned build
+image, file sizes, SHA-256 checksums, and CKB data hashes. Run
+`sha256sum --strict --check SHA256SUMS` from the extracted artifact directory.
+
+A push of a protected `vMAJOR.MINOR.PATCH` tag pointing to the default branch
+history publishes those same files as GitHub Release assets. Tags with a suffix
+such as `v1.2.3-rc.1` are marked as prereleases. The tag ruleset should restrict
+version tag creation, updates, and deletion to authorized maintainers. Branches,
+pull requests, and manual runs never create a release. This workflow only
+publishes build outputs; it does not deploy them on-chain.
+
 ## Run tests
 
 ``` bash
